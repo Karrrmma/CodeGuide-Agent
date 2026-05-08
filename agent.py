@@ -1,40 +1,67 @@
 import os
 import json
 from pathlib import Path
+
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from tools import list_files, read_file, search_code
 
-from collections import Counter
 
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
-def pick_relevant_files(search_results: list[dict], limit: int = 5) -> list[str]:
-    file_counts = Counter(result["file"] for result in search_results)
 
-    return [
-        file
-        for file, count in file_counts.most_common(limit)
-    ]
-def read_relevant_files(project_path: str, files: list[str]) -> str:
-    context = ""
-
-    for file in files:
-        try:
-            content = read_file(project_path, file)
-        except Exception as error:
-            context += f"\n\n## {file}\nCould not read file: {error}\n"
-            continue
-
-        context += f"\n\n## {file}\n"
-        context += "```text\n"
-        context += content[:8000]
-        context += "\n```"
-
-    return context
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List files in the project, ignoring unsafe/generated folders.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_code",
+            "description": "Search the codebase for a keyword or phrase.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Short code search term, such as login, auth, route, task, database, or component.",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a specific file from the project.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Relative file path inside the project.",
+                    }
+                },
+                "required": ["file_path"],
+            },
+        },
+    },
+]
 
 
 def load_prompt(path: str) -> str:
@@ -44,13 +71,11 @@ def load_prompt(path: str) -> str:
 def build_system_prompt() -> str:
     system_prompt = load_prompt("prompts/system.md")
     workflow_prompt = load_prompt("prompts/workflow.md")
-
     return system_prompt + "\n\n" + workflow_prompt
 
 
 def create_project_summary(project_path: str) -> str:
     files = list_files(project_path)
-
     file_list = "\n".join(f"- {file}" for file in files[:200])
 
     return f"""
@@ -61,85 +86,50 @@ Files:
 """
 
 
-def ask_model(messages: list[dict]) -> str:
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=messages,
-    )
+def run_tool(tool_name: str, arguments: dict, project_path: str):
+    if tool_name == "list_files":
+        return list_files(project_path)[:300]
 
-    return response.choices[0].message.content
+    if tool_name == "search_code":
+        query = arguments["query"]
+        return search_code(project_path, query)[:50]
 
-def search_multiple_terms(project_path: str, terms: list[str]) -> list[dict]:
-    all_results = []
-    seen = set()
+    if tool_name == "read_file":
+        file_path = arguments["file_path"]
+        content = read_file(project_path, file_path)
+        return content[:8000]
 
-    for term in terms:
-        results = search_code(project_path, term)
+    raise ValueError(f"Unknown tool: {tool_name}")
 
-        for result in results:
-            key = (result["file"], result["line"], result["text"])
 
-            if key in seen:
-                continue
+def ask_agent(messages: list[dict], project_path: str) -> str:
+    for _ in range(6):
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+        )
 
-            seen.add(key)
+        message = response.choices[0].message
+        messages.append(message.model_dump(exclude_none=True))
 
-            all_results.append({
-                "term": term,
-                "file": result["file"],
-                "line": result["line"],
-                "text": result["text"],
+        if not message.tool_calls:
+            return message.content or ""
+
+        for tool_call in message.tool_calls:
+            tool_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+
+            result = run_tool(tool_name, arguments, project_path)
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps(result),
             })
 
-    return all_results
-
-
-def plan_search_terms(question: str) -> list[str]:
-    messages = [
-        {
-            "role": "system",
-            "content": """
-You turn codebase questions into useful code search keywords.
-
-Return only a JSON array of short search terms.
-
-Good examples:
-Question: Where is login handled?
-Answer: ["login", "auth", "signin", "session", "token", "password"]
-
-Question: How does the app connect to the database?
-Answer: ["database", "db", "connection", "connect", "DATABASE_URL", "prisma", "sql"]
-
-Question: Where are API routes defined?
-Answer: ["route", "router", "api", "endpoint", "controller"]
-
-Rules:
-- Return only JSON.
-- Use 3 to 8 search terms.
-- Prefer words likely to appear in code.
-- Include common synonyms.
-""",
-        },
-        {
-            "role": "user",
-            "content": question,
-        },
-    ]
-
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=messages,
-    )
-
-    text = response.choices[0].message.content
-
-    try:
-        terms = json.loads(text)
-    except json.JSONDecodeError:
-        terms = [question]
-
-    return terms
-
+    return "I used the maximum number of tool steps and could not finish confidently."
 
 def main():
     project_path = input("Enter project path: ").strip()
@@ -166,59 +156,13 @@ def main():
 
         if question.lower() in {"exit", "quit"}:
             break
-        search_terms = plan_search_terms(question)
-        search_results = search_multiple_terms(project_path, search_terms)
-        relevant_files = pick_relevant_files(search_results)
-        file_context = read_relevant_files(project_path, relevant_files)
-
-        context = f"Search terms used: {search_terms}\n\n"
-
-        if search_results:
-            context += "Search results:\n"
-            for result in search_results[:30]:
-                context += (
-                    f"- Search term: {result['term']} | "
-                    f"{result['file']}:{result['line']} "
-                    f"{result['text']}\n"
-                )
-
-            context += "\n\nInspected files:\n"
-            for file in relevant_files:
-                context += f"- {file}\n"
-
-            context += "\n\nFile contents inspected:\n"
-            context += file_context
-        else:
-            context += "No search results found. Answer honestly and suggest better search terms.\n"
 
         messages.append({
             "role": "user",
-            "content": f"""
-User question:
-{question}
-
-Relevant code search results:
-{context}
-
-Answer the user using the RepoLens workflow.
-""",
+            "content": question,
         })
 
-        answer = ask_model(messages)
-
-        messages.append({
-    "role": "user",
-    "content": f"""
-User question:
-{question}
-
-RepoLens inspected the following context:
-{context}
-
-Answer the user using only the inspected context. Cite file paths. If the context is not enough, say what should be inspected next.
-""",
-})
-
+        answer = ask_agent(messages, project_path)
 
         print(f"\nRepoLens: {answer}\n")
 
