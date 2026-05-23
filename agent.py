@@ -85,7 +85,6 @@ Files:
 {file_list}
 """
 
-
 def run_tool(tool_name: str, arguments: dict, project_path: str):
     if tool_name == "list_files":
         return list_files(project_path)[:300]
@@ -132,7 +131,7 @@ def ask_agent(messages: list[dict], project_path: str) -> str:
     return "I used the maximum number of tool steps and could not finish confidently."
 
 def main():
-    project_path = input("Enter project path: ").strip()
+    project_path = input("Enter the project path: ").strip()
 
     system_prompt = build_system_prompt()
     project_summary = create_project_summary(project_path)
