@@ -147,7 +147,7 @@ def main():
         },
     ]
 
-    print("\nRepoLens is ready. Ask about this codebase.")
+    print("\nCodeGuide-Agent is ready. Ask about this codebase.")
     print("Type 'exit' to quit.\n")
 
     while True:
@@ -163,7 +163,7 @@ def main():
 
         answer = ask_agent(messages, project_path)
 
-        print(f"\nRepoLens: {answer}\n")
+        print(f"\nCodeGuide-Agent: {answer}\n")
 
 
 if __name__ == "__main__":
